@@ -1,4 +1,6 @@
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::Manager;
+#[cfg(target_os = "macos")]
+use tauri::{RunEvent, WindowEvent};
 
 mod backend;
 mod codex;
@@ -52,6 +54,8 @@ pub fn run() {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = event;
         })
         .setup(|app| {
             let state = state::AppState::load(&app.handle());
@@ -158,11 +162,16 @@ pub fn run() {
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
-        if let RunEvent::Reopen { .. } = event {
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+        #[cfg(target_os = "macos")]
+        {
+            if let RunEvent::Reopen { .. } = event {
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (app_handle, event);
     });
 }
