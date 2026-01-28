@@ -5,14 +5,12 @@ import { usePanelVisibility } from "../../layout/hooks/usePanelVisibility";
 import { usePanelShortcuts } from "../../layout/hooks/usePanelShortcuts";
 
 export function useLayoutController({
-  uiScale,
   activeWorkspaceId,
   setActiveTab,
   setDebugOpen,
   toggleDebugPanelShortcut,
   toggleTerminalShortcut,
 }: {
-  uiScale: number;
   activeWorkspaceId: string | null;
   setActiveTab: (tab: "projects" | "codex" | "git" | "log") => void;
   setDebugOpen: (value: boolean | ((prev: boolean) => boolean)) => void;
@@ -30,7 +28,7 @@ export function useLayoutController({
     onTerminalPanelResizeStart,
     debugPanelHeight,
     onDebugPanelResizeStart,
-  } = useResizablePanels(uiScale);
+  } = useResizablePanels();
 
   const layoutMode = useLayoutMode();
   const isCompact = layoutMode !== "desktop";
@@ -51,6 +49,7 @@ export function useLayoutController({
     onToggleDebug: handleDebugClick,
     onToggleTerminal: handleToggleTerminal,
     openTerminal,
+    closeTerminal,
   } = usePanelVisibility({
     isCompact,
     activeWorkspaceId,
@@ -90,5 +89,6 @@ export function useLayoutController({
     handleDebugClick,
     handleToggleTerminal,
     openTerminal,
+    closeTerminal,
   };
 }

@@ -21,6 +21,14 @@ import type {
   ReviewTarget,
 } from "../types";
 
+function isMissingTauriInvokeError(error: unknown) {
+  return (
+    error instanceof TypeError &&
+    (error.message.includes("reading 'invoke'") ||
+      error.message.includes("reading \"invoke\""))
+  );
+}
+
 export async function pickWorkspacePath(): Promise<string | null> {
   const selection = await open({ directory: true, multiple: false });
   if (!selection || Array.isArray(selection)) {
@@ -46,11 +54,79 @@ export async function pickImageFiles(): Promise<string[]> {
 }
 
 export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
-  return invoke<WorkspaceInfo[]>("list_workspaces");
+  try {
+    return await invoke<WorkspaceInfo[]>("list_workspaces");
+  } catch (error) {
+    if (isMissingTauriInvokeError(error)) {
+      // In non-Tauri environments (e.g., Electron/web previews), the invoke
+      // bridge may be missing. Treat this as "no workspaces" instead of crashing.
+      console.warn("Tauri invoke bridge unavailable; returning empty workspaces list.");
+      return [];
+    }
+    throw error;
+  }
 }
 
 export async function getCodexConfigPath(): Promise<string> {
   return invoke<string>("get_codex_config_path");
+}
+
+export type TextFileResponse = {
+  exists: boolean;
+  content: string;
+  truncated: boolean;
+};
+
+export type GlobalAgentsResponse = TextFileResponse;
+export type GlobalCodexConfigResponse = TextFileResponse;
+export type AgentMdResponse = TextFileResponse;
+
+type FileScope = "workspace" | "global";
+type FileKind = "agents" | "config";
+
+async function fileRead(
+  scope: FileScope,
+  kind: FileKind,
+  workspaceId?: string,
+): Promise<TextFileResponse> {
+  return invoke<TextFileResponse>("file_read", { scope, kind, workspaceId });
+}
+
+async function fileWrite(
+  scope: FileScope,
+  kind: FileKind,
+  content: string,
+  workspaceId?: string,
+): Promise<void> {
+  return invoke("file_write", { scope, kind, workspaceId, content });
+}
+
+export async function readGlobalAgentsMd(): Promise<GlobalAgentsResponse> {
+  return fileRead("global", "agents");
+}
+
+export async function writeGlobalAgentsMd(content: string): Promise<void> {
+  return fileWrite("global", "agents", content);
+}
+
+export async function readGlobalCodexConfigToml(): Promise<GlobalCodexConfigResponse> {
+  return fileRead("global", "config");
+}
+
+export async function writeGlobalCodexConfigToml(content: string): Promise<void> {
+  return fileWrite("global", "config", content);
+}
+
+export async function getConfigModel(workspaceId: string): Promise<string | null> {
+  const response = await invoke<{ model?: string | null }>("get_config_model", {
+    workspaceId,
+  });
+  const model = response?.model;
+  if (typeof model !== "string") {
+    return null;
+  }
+  const trimmed = model.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export async function addWorkspace(
@@ -81,6 +157,21 @@ export async function addWorktree(
   branch: string,
 ): Promise<WorkspaceInfo> {
   return invoke<WorkspaceInfo>("add_worktree", { parentId, branch });
+}
+
+export type WorktreeSetupStatus = {
+  shouldRun: boolean;
+  script: string | null;
+};
+
+export async function getWorktreeSetupStatus(
+  workspaceId: string,
+): Promise<WorktreeSetupStatus> {
+  return invoke<WorktreeSetupStatus>("worktree_setup_status", { workspaceId });
+}
+
+export async function markWorktreeSetupRan(workspaceId: string): Promise<void> {
+  return invoke("worktree_setup_mark_ran", { workspaceId });
 }
 
 export async function updateWorkspaceSettings(
@@ -483,6 +574,14 @@ export async function readWorkspaceFile(
     workspaceId,
     path,
   });
+}
+
+export async function readAgentMd(workspaceId: string): Promise<AgentMdResponse> {
+  return fileRead("workspace", "agents", workspaceId);
+}
+
+export async function writeAgentMd(workspaceId: string, content: string): Promise<void> {
+  return fileWrite("workspace", "agents", content, workspaceId);
 }
 
 export async function listGitBranches(workspaceId: string) {

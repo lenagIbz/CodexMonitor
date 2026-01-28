@@ -6,6 +6,7 @@ export type WorkspaceSettings = {
   codexHome?: string | null;
   codexArgs?: string | null;
   launchScript?: string | null;
+  worktreeSetupScript?: string | null;
 };
 
 export type WorkspaceGroup = {
@@ -49,6 +50,12 @@ export type ConversationItem =
   | { id: string; kind: "reasoning"; summary: string; content: string }
   | { id: string; kind: "diff"; title: string; diff: string; status?: string }
   | { id: string; kind: "review"; state: "started" | "completed"; text: string }
+  | {
+      id: string;
+      kind: "explore";
+      status: "exploring" | "explored";
+      entries: { kind: "read" | "search" | "list" | "run"; label: string; detail?: string }[];
+    }
   | {
       id: string;
       kind: "tool";
@@ -111,9 +118,11 @@ export type AppSettings = {
   composerAccessShortcut: string | null;
   composerReasoningShortcut: string | null;
   composerCollaborationShortcut: string | null;
+  interruptShortcut: string | null;
   newAgentShortcut: string | null;
   newWorktreeAgentShortcut: string | null;
   newCloneAgentShortcut: string | null;
+  archiveThreadShortcut: string | null;
   toggleProjectsSidebarShortcut: string | null;
   toggleGitSidebarShortcut: string | null;
   toggleDebugPanelShortcut: string | null;
@@ -180,6 +189,7 @@ export type RequestUserInputQuestion = {
   id: string;
   header: string;
   question: string;
+  isOther?: boolean;
   options?: RequestUserInputOption[];
 };
 
@@ -390,7 +400,7 @@ export type ModelOption = {
   displayName: string;
   description: string;
   supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
-  defaultReasoningEffort: string;
+  defaultReasoningEffort: string | null;
   isDefault: boolean;
 };
 

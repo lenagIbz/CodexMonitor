@@ -82,6 +82,310 @@ describe("threadItems", () => {
     expect(prepared[0].kind).toBe("review");
   });
 
+  it("summarizes explored reads and hides raw commands", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: cat src/foo.ts",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+      {
+        id: "cmd-2",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: sed -n '1,10p' src/bar.ts",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+      {
+        id: "msg-1",
+        kind: "message",
+        role: "assistant",
+        text: "Done reading",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(2);
+      expect(prepared[0].entries[0].kind).toBe("read");
+      expect(prepared[0].entries[0].label).toContain("foo.ts");
+      expect(prepared[0].entries[1].kind).toBe("read");
+      expect(prepared[0].entries[1].label).toContain("bar.ts");
+    }
+    expect(prepared.filter((item) => item.kind === "tool")).toHaveLength(0);
+  });
+
+  it("deduplicates explore entries when consecutive summaries merge", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: cat src/customPrompts.ts",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+      {
+        id: "cmd-2",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: cat src/customPrompts.ts",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(1);
+      expect(prepared[0].entries[0].label).toContain("customPrompts.ts");
+    }
+  });
+
+  it("preserves distinct read paths that share the same basename", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: cat src/foo/index.ts",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+      {
+        id: "cmd-2",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: cat tests/foo/index.ts",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(2);
+      const details = prepared[0].entries.map((entry) => entry.detail ?? entry.label);
+      expect(details).toContain("src/foo/index.ts");
+      expect(details).toContain("tests/foo/index.ts");
+    }
+  });
+
+  it("preserves multi-path read commands instead of collapsing to the last path", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: cat src/a.ts src/b.ts",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(2);
+      const details = prepared[0].entries.map((entry) => entry.detail ?? entry.label);
+      expect(details).toContain("src/a.ts");
+      expect(details).toContain("src/b.ts");
+    }
+  });
+
+  it("ignores glob patterns when summarizing rg --files commands", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg --files -g '*.ts' src",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(1);
+      expect(prepared[0].entries[0].kind).toBe("list");
+      expect(prepared[0].entries[0].label).toBe("src");
+    }
+  });
+
+  it("skips rg glob flag values and keeps the actual search path", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: rg myQuery -g '*.ts' src",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(1);
+      expect(prepared[0].entries[0].kind).toBe("search");
+      expect(prepared[0].entries[0].label).toBe("myQuery in src");
+    }
+  });
+
+  it("unwraps unquoted /bin/zsh -lc rg commands", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: 'Command: /bin/zsh -lc rg -n "RouterDestination" src',
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(1);
+      expect(prepared[0].entries[0].kind).toBe("search");
+      expect(prepared[0].entries[0].label).toBe("RouterDestination in src");
+    }
+  });
+
+  it("treats nl -ba as a read command", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: nl -ba src/foo.ts",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(1);
+      expect(prepared[0].entries[0].kind).toBe("read");
+      expect(prepared[0].entries[0].detail ?? prepared[0].entries[0].label).toBe(
+        "src/foo.ts",
+      );
+    }
+  });
+
+  it("summarizes piped nl commands using the left-hand read", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: nl -ba src/foo.ts | sed -n '1,10p'",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(1);
+      expect(prepared[0].entries[0].kind).toBe("read");
+      expect(prepared[0].entries[0].detail ?? prepared[0].entries[0].label).toBe(
+        "src/foo.ts",
+      );
+    }
+  });
+
+  it("does not trim pipes that appear inside quoted arguments", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: 'Command: rg "foo | bar" src',
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("explore");
+    if (prepared[0].kind === "explore") {
+      expect(prepared[0].entries).toHaveLength(1);
+      expect(prepared[0].entries[0].kind).toBe("search");
+      expect(prepared[0].entries[0].label).toBe("foo | bar in src");
+    }
+  });
+
+  it("keeps raw commands when they are not recognized", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: git status",
+        detail: "",
+        status: "completed",
+        output: "",
+      },
+    ];
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("tool");
+  });
+
+  it("keeps raw commands when they fail", () => {
+    const items: ConversationItem[] = [
+      {
+        id: "cmd-1",
+        kind: "tool",
+        toolType: "commandExecution",
+        title: "Command: cat src/foo.ts",
+        detail: "",
+        status: "failed",
+        output: "No such file",
+      },
+    ];
+    const prepared = prepareThreadItems(items);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].kind).toBe("tool");
+  });
+
   it("builds file change items with summary details", () => {
     const item = buildConversationItem({
       type: "fileChange",

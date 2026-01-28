@@ -6,6 +6,7 @@ import { MainHeader } from "../../app/components/MainHeader";
 import { Messages } from "../../messages/components/Messages";
 import { ApprovalToasts } from "../../app/components/ApprovalToasts";
 import { UpdateToast } from "../../update/components/UpdateToast";
+import { ErrorToasts } from "../../notifications/components/ErrorToasts";
 import { Composer } from "../../composer/components/Composer";
 import { GitDiffPanel } from "../../git/components/GitDiffPanel";
 import { GitDiffViewer } from "../../git/components/GitDiffViewer";
@@ -49,6 +50,7 @@ import type {
 import type { UpdateState } from "../../update/hooks/useUpdater";
 import type { TerminalSessionState } from "../../terminal/hooks/useTerminalSession";
 import type { TerminalTab } from "../../terminal/hooks/useTerminalTabs";
+import type { ErrorToast } from "../../../services/toasts";
 
 type ThreadActivityStatus = {
   isProcessing: boolean;
@@ -160,6 +162,8 @@ type LayoutNodesOptions = {
   updaterState: UpdateState;
   onUpdate: () => void;
   onDismissUpdate: () => void;
+  errorToasts: ErrorToast[];
+  onDismissErrorToast: (id: string) => void;
   latestAgentRuns: Array<{
     threadId: string;
     message: string;
@@ -347,6 +351,7 @@ type LayoutNodesOptions = {
   reasoningOptions: string[];
   selectedEffort: string | null;
   onSelectEffort: (effort: string | null) => void;
+  reasoningSupported: boolean;
   accessMode: AccessMode;
   onSelectAccessMode: (mode: AccessMode) => void;
   skills: SkillOption[];
@@ -393,6 +398,7 @@ type LayoutNodesResult = {
   composerNode: ReactNode;
   approvalToastsNode: ReactNode;
   updateToastNode: ReactNode;
+  errorToastsNode: ReactNode;
   homeNode: ReactNode;
   mainHeaderNode: ReactNode;
   desktopTopbarLeftNode: ReactNode;
@@ -519,12 +525,14 @@ export function useLayoutNodes(options: LayoutNodesOptions): LayoutNodesResult {
       reasoningOptions={options.reasoningOptions}
       selectedEffort={options.selectedEffort}
       onSelectEffort={options.onSelectEffort}
+      reasoningSupported={options.reasoningSupported}
       accessMode={options.accessMode}
       onSelectAccessMode={options.onSelectAccessMode}
       skills={options.skills}
       prompts={options.prompts}
       files={options.files}
       textareaRef={options.textareaRef}
+      historyKey={options.activeWorkspace?.id ?? null}
       editorSettings={options.composerEditorSettings}
       editorExpanded={options.composerEditorExpanded}
       onToggleEditorExpanded={options.onToggleComposerEditorExpanded}
@@ -557,6 +565,10 @@ export function useLayoutNodes(options: LayoutNodesOptions): LayoutNodesResult {
       onUpdate={options.onUpdate}
       onDismiss={options.onDismissUpdate}
     />
+  );
+
+  const errorToastsNode = (
+    <ErrorToasts toasts={options.errorToasts} onDismiss={options.onDismissErrorToast} />
   );
 
   const homeNode = (
@@ -848,6 +860,7 @@ export function useLayoutNodes(options: LayoutNodesOptions): LayoutNodesResult {
     composerNode,
     approvalToastsNode,
     updateToastNode,
+    errorToastsNode,
     homeNode,
     mainHeaderNode,
     desktopTopbarLeftNode,

@@ -268,6 +268,15 @@ pub(crate) struct WorkspaceSettings {
     pub(crate) codex_args: Option<String>,
     #[serde(default, rename = "launchScript")]
     pub(crate) launch_script: Option<String>,
+    #[serde(default, rename = "worktreeSetupScript")]
+    pub(crate) worktree_setup_script: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(crate) struct WorktreeSetupStatus {
+    #[serde(rename = "shouldRun")]
+    pub(crate) should_run: bool,
+    pub(crate) script: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -312,6 +321,8 @@ pub(crate) struct AppSettings {
         rename = "composerReasoningShortcut"
     )]
     pub(crate) composer_reasoning_shortcut: Option<String>,
+    #[serde(default = "default_interrupt_shortcut", rename = "interruptShortcut")]
+    pub(crate) interrupt_shortcut: Option<String>,
     #[serde(
         default = "default_composer_collaboration_shortcut",
         rename = "composerCollaborationShortcut"
@@ -329,6 +340,11 @@ pub(crate) struct AppSettings {
         rename = "newCloneAgentShortcut"
     )]
     pub(crate) new_clone_agent_shortcut: Option<String>,
+    #[serde(
+        default = "default_archive_thread_shortcut",
+        rename = "archiveThreadShortcut"
+    )]
+    pub(crate) archive_thread_shortcut: Option<String>,
     #[serde(
         default = "default_toggle_projects_sidebar_shortcut",
         rename = "toggleProjectsSidebarShortcut"
@@ -505,6 +521,15 @@ fn default_composer_reasoning_shortcut() -> Option<String> {
     Some("cmd+shift+r".to_string())
 }
 
+fn default_interrupt_shortcut() -> Option<String> {
+    let value = if cfg!(target_os = "macos") {
+        "ctrl+c"
+    } else {
+        "ctrl+shift+c"
+    };
+    Some(value.to_string())
+}
+
 fn default_composer_collaboration_shortcut() -> Option<String> {
     Some("shift+tab".to_string())
 }
@@ -519,6 +544,10 @@ fn default_new_worktree_agent_shortcut() -> Option<String> {
 
 fn default_new_clone_agent_shortcut() -> Option<String> {
     Some("cmd+alt+n".to_string())
+}
+
+fn default_archive_thread_shortcut() -> Option<String> {
+    Some("cmd+ctrl+a".to_string())
 }
 
 fn default_toggle_projects_sidebar_shortcut() -> Option<String> {
@@ -694,10 +723,12 @@ impl Default for AppSettings {
             composer_model_shortcut: default_composer_model_shortcut(),
             composer_access_shortcut: default_composer_access_shortcut(),
             composer_reasoning_shortcut: default_composer_reasoning_shortcut(),
+            interrupt_shortcut: default_interrupt_shortcut(),
             composer_collaboration_shortcut: default_composer_collaboration_shortcut(),
             new_agent_shortcut: default_new_agent_shortcut(),
             new_worktree_agent_shortcut: default_new_worktree_agent_shortcut(),
             new_clone_agent_shortcut: default_new_clone_agent_shortcut(),
+            archive_thread_shortcut: default_archive_thread_shortcut(),
             toggle_projects_sidebar_shortcut: default_toggle_projects_sidebar_shortcut(),
             toggle_git_sidebar_shortcut: default_toggle_git_sidebar_shortcut(),
             toggle_debug_panel_shortcut: default_toggle_debug_panel_shortcut(),
@@ -767,6 +798,16 @@ mod tests {
         assert_eq!(
             settings.composer_collaboration_shortcut.as_deref(),
             Some("shift+tab")
+        );
+        let expected_interrupt = if cfg!(target_os = "macos") {
+            "ctrl+c"
+        } else {
+            "ctrl+shift+c"
+        };
+        assert_eq!(settings.interrupt_shortcut.as_deref(), Some(expected_interrupt));
+        assert_eq!(
+            settings.archive_thread_shortcut.as_deref(),
+            Some("cmd+ctrl+a")
         );
         assert_eq!(
             settings.toggle_debug_panel_shortcut.as_deref(),

@@ -1,12 +1,19 @@
 use tauri::Manager;
 #[cfg(target_os = "macos")]
 use tauri::{RunEvent, WindowEvent};
+use tauri::Manager;
+#[cfg(target_os = "macos")]
+use tauri::{RunEvent, WindowEvent};
 
 mod backend;
 mod codex;
 mod codex_args;
 mod codex_config;
 mod codex_home;
+mod file_io;
+mod file_ops;
+mod file_policy;
+mod files;
 #[cfg(not(target_os = "windows"))]
 #[path = "dictation.rs"]
 mod dictation;
@@ -80,6 +87,9 @@ pub fn run() {
             settings::get_app_settings,
             settings::update_app_settings,
             settings::get_codex_config_path,
+            files::file_read,
+            files::file_write,
+            codex::get_config_model,
             menu::menu_set_accelerators,
             codex::codex_doctor,
             workspaces::list_workspaces,
@@ -87,6 +97,8 @@ pub fn run() {
             workspaces::add_workspace,
             workspaces::add_clone,
             workspaces::add_worktree,
+            workspaces::worktree_setup_status,
+            workspaces::worktree_setup_mark_ran,
             workspaces::remove_workspace,
             workspaces::remove_worktree,
             workspaces::rename_worktree,

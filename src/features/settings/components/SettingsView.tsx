@@ -24,7 +24,11 @@ import type {
   WorkspaceInfo,
 } from "../../../types";
 import { formatDownloadSize } from "../../../utils/formatting";
-import { buildShortcutValue, formatShortcut } from "../../../utils/shortcuts";
+import {
+  buildShortcutValue,
+  formatShortcut,
+  getDefaultInterruptShortcut,
+} from "../../../utils/shortcuts";
 import { clampUiScale } from "../../../utils/uiScale";
 import { getCodexConfigPath } from "../../../services/tauri";
 import {
@@ -38,6 +42,9 @@ import {
 } from "../../../utils/fonts";
 import { DEFAULT_OPEN_APP_ID, OPEN_APP_STORAGE_KEY } from "../../app/constants";
 import { GENERIC_APP_ICON, getKnownOpenAppIcon } from "../../app/utils/openAppIcons";
+import { useGlobalAgentsMd } from "../hooks/useGlobalAgentsMd";
+import { useGlobalCodexConfigToml } from "../hooks/useGlobalCodexConfigToml";
+import { FileEditorCard } from "../../shared/components/FileEditorCard";
 
 const DICTATION_MODELS = [
   { id: "tiny", label: "Tiny", size: "75 MB", note: "Fastest, least accurate." },
@@ -174,9 +181,11 @@ type ShortcutSettingKey =
   | "composerAccessShortcut"
   | "composerReasoningShortcut"
   | "composerCollaborationShortcut"
+  | "interruptShortcut"
   | "newAgentShortcut"
   | "newWorktreeAgentShortcut"
   | "newCloneAgentShortcut"
+  | "archiveThreadShortcut"
   | "toggleProjectsSidebarShortcut"
   | "toggleGitSidebarShortcut"
   | "toggleDebugPanelShortcut"
@@ -190,9 +199,11 @@ type ShortcutDraftKey =
   | "access"
   | "reasoning"
   | "collaboration"
+  | "interrupt"
   | "newAgent"
   | "newWorktreeAgent"
   | "newCloneAgent"
+  | "archiveThread"
   | "projectsSidebar"
   | "gitSidebar"
   | "debugPanel"
@@ -209,9 +220,11 @@ const shortcutDraftKeyBySetting: Record<ShortcutSettingKey, ShortcutDraftKey> = 
   composerAccessShortcut: "access",
   composerReasoningShortcut: "reasoning",
   composerCollaborationShortcut: "collaboration",
+  interruptShortcut: "interrupt",
   newAgentShortcut: "newAgent",
   newWorktreeAgentShortcut: "newWorktreeAgent",
   newCloneAgentShortcut: "newCloneAgent",
+  archiveThreadShortcut: "archiveThread",
   toggleProjectsSidebarShortcut: "projectsSidebar",
   toggleGitSidebarShortcut: "gitSidebar",
   toggleDebugPanelShortcut: "debugPanel",
@@ -297,6 +310,30 @@ export function SettingsView({
     status: "idle" | "running" | "done";
     result: CodexDoctorResult | null;
   }>({ status: "idle", result: null });
+  const {
+    content: globalAgentsContent,
+    exists: globalAgentsExists,
+    truncated: globalAgentsTruncated,
+    isLoading: globalAgentsLoading,
+    isSaving: globalAgentsSaving,
+    error: globalAgentsError,
+    isDirty: globalAgentsDirty,
+    setContent: setGlobalAgentsContent,
+    refresh: refreshGlobalAgents,
+    save: saveGlobalAgents,
+  } = useGlobalAgentsMd();
+  const {
+    content: globalConfigContent,
+    exists: globalConfigExists,
+    truncated: globalConfigTruncated,
+    isLoading: globalConfigLoading,
+    isSaving: globalConfigSaving,
+    error: globalConfigError,
+    isDirty: globalConfigDirty,
+    setContent: setGlobalConfigContent,
+    refresh: refreshGlobalConfig,
+    save: saveGlobalConfig,
+  } = useGlobalCodexConfigToml();
   const [openConfigError, setOpenConfigError] = useState<string | null>(null);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [shortcutDrafts, setShortcutDrafts] = useState({
@@ -304,9 +341,11 @@ export function SettingsView({
     access: appSettings.composerAccessShortcut ?? "",
     reasoning: appSettings.composerReasoningShortcut ?? "",
     collaboration: appSettings.composerCollaborationShortcut ?? "",
+    interrupt: appSettings.interruptShortcut ?? "",
     newAgent: appSettings.newAgentShortcut ?? "",
     newWorktreeAgent: appSettings.newWorktreeAgentShortcut ?? "",
     newCloneAgent: appSettings.newCloneAgentShortcut ?? "",
+    archiveThread: appSettings.archiveThreadShortcut ?? "",
     projectsSidebar: appSettings.toggleProjectsSidebarShortcut ?? "",
     gitSidebar: appSettings.toggleGitSidebarShortcut ?? "",
     debugPanel: appSettings.toggleDebugPanelShortcut ?? "",
@@ -318,6 +357,42 @@ export function SettingsView({
   });
   const dictationReady = dictationModelStatus?.state === "ready";
   const dictationProgress = dictationModelStatus?.progress ?? null;
+  const globalAgentsStatus = globalAgentsLoading
+    ? "Loading…"
+    : globalAgentsSaving
+      ? "Saving…"
+      : globalAgentsExists
+        ? ""
+        : "Not found";
+  const globalAgentsMetaParts: string[] = [];
+  if (globalAgentsStatus) {
+    globalAgentsMetaParts.push(globalAgentsStatus);
+  }
+  if (globalAgentsTruncated) {
+    globalAgentsMetaParts.push("Truncated");
+  }
+  const globalAgentsMeta = globalAgentsMetaParts.join(" · ");
+  const globalAgentsSaveLabel = globalAgentsExists ? "Save" : "Create";
+  const globalAgentsSaveDisabled = globalAgentsLoading || globalAgentsSaving || !globalAgentsDirty;
+  const globalAgentsRefreshDisabled = globalAgentsLoading || globalAgentsSaving;
+  const globalConfigStatus = globalConfigLoading
+    ? "Loading…"
+    : globalConfigSaving
+      ? "Saving…"
+      : globalConfigExists
+        ? ""
+        : "Not found";
+  const globalConfigMetaParts: string[] = [];
+  if (globalConfigStatus) {
+    globalConfigMetaParts.push(globalConfigStatus);
+  }
+  if (globalConfigTruncated) {
+    globalConfigMetaParts.push("Truncated");
+  }
+  const globalConfigMeta = globalConfigMetaParts.join(" · ");
+  const globalConfigSaveLabel = globalConfigExists ? "Save" : "Create";
+  const globalConfigSaveDisabled = globalConfigLoading || globalConfigSaving || !globalConfigDirty;
+  const globalConfigRefreshDisabled = globalConfigLoading || globalConfigSaving;
   const selectedDictationModel = useMemo(() => {
     return (
       DICTATION_MODELS.find(
@@ -405,9 +480,11 @@ export function SettingsView({
       access: appSettings.composerAccessShortcut ?? "",
       reasoning: appSettings.composerReasoningShortcut ?? "",
       collaboration: appSettings.composerCollaborationShortcut ?? "",
+      interrupt: appSettings.interruptShortcut ?? "",
       newAgent: appSettings.newAgentShortcut ?? "",
       newWorktreeAgent: appSettings.newWorktreeAgentShortcut ?? "",
       newCloneAgent: appSettings.newCloneAgentShortcut ?? "",
+      archiveThread: appSettings.archiveThreadShortcut ?? "",
       projectsSidebar: appSettings.toggleProjectsSidebarShortcut ?? "",
       gitSidebar: appSettings.toggleGitSidebarShortcut ?? "",
       debugPanel: appSettings.toggleDebugPanelShortcut ?? "",
@@ -422,9 +499,11 @@ export function SettingsView({
     appSettings.composerModelShortcut,
     appSettings.composerReasoningShortcut,
     appSettings.composerCollaborationShortcut,
+    appSettings.interruptShortcut,
     appSettings.newAgentShortcut,
     appSettings.newWorktreeAgentShortcut,
     appSettings.newCloneAgentShortcut,
+    appSettings.archiveThreadShortcut,
     appSettings.toggleProjectsSidebarShortcut,
     appSettings.toggleGitSidebarShortcut,
     appSettings.toggleDebugPanelShortcut,
@@ -1921,6 +2000,30 @@ export function SettingsView({
                     Default: {formatShortcut("cmd+alt+n")}
                   </div>
                 </div>
+                <div className="settings-field">
+                  <div className="settings-field-label">Archive active thread</div>
+                  <div className="settings-field-row">
+                    <input
+                      className="settings-input settings-input--shortcut"
+                      value={formatShortcut(shortcutDrafts.archiveThread)}
+                      onKeyDown={(event) =>
+                        handleShortcutKeyDown(event, "archiveThreadShortcut")
+                      }
+                      placeholder="Type shortcut"
+                      readOnly
+                    />
+                    <button
+                      type="button"
+                      className="ghost settings-button-compact"
+                      onClick={() => void updateShortcut("archiveThreadShortcut", null)}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="settings-help">
+                    Default: {formatShortcut("cmd+ctrl+a")}
+                  </div>
+                </div>
                 <div className="settings-divider" />
                 <div className="settings-subsection-title">Composer</div>
                 <div className="settings-subsection-subtitle">
@@ -2020,6 +2123,30 @@ export function SettingsView({
                   </div>
                   <div className="settings-help">
                     Default: {formatShortcut("shift+tab")}
+                  </div>
+                </div>
+                <div className="settings-field">
+                  <div className="settings-field-label">Stop active run</div>
+                  <div className="settings-field-row">
+                    <input
+                      className="settings-input settings-input--shortcut"
+                      value={formatShortcut(shortcutDrafts.interrupt)}
+                      onKeyDown={(event) =>
+                        handleShortcutKeyDown(event, "interruptShortcut")
+                      }
+                      placeholder="Type shortcut"
+                      readOnly
+                    />
+                    <button
+                      type="button"
+                      className="ghost settings-button-compact"
+                      onClick={() => void updateShortcut("interruptShortcut", null)}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="settings-help">
+                    Default: {formatShortcut(getDefaultInterruptShortcut())}
                   </div>
                 </div>
                 <div className="settings-divider" />
@@ -2603,6 +2730,76 @@ export function SettingsView({
                     </div>
                   </div>
                 )}
+
+                <FileEditorCard
+                  title="Global AGENTS.md"
+                  meta={globalAgentsMeta}
+                  error={globalAgentsError}
+                  value={globalAgentsContent}
+                  placeholder="Add global instructions for Codex agents…"
+                  disabled={globalAgentsLoading}
+                  refreshDisabled={globalAgentsRefreshDisabled}
+                  saveDisabled={globalAgentsSaveDisabled}
+                  saveLabel={globalAgentsSaveLabel}
+                  onChange={setGlobalAgentsContent}
+                  onRefresh={() => {
+                    void refreshGlobalAgents();
+                  }}
+                  onSave={() => {
+                    void saveGlobalAgents();
+                  }}
+                  helpText={
+                    <>
+                      Stored at <code>~/.codex/AGENTS.md</code>.
+                    </>
+                  }
+                  classNames={{
+                    container: "settings-field settings-agents",
+                    header: "settings-agents-header",
+                    title: "settings-field-label",
+                    actions: "settings-agents-actions",
+                    meta: "settings-help settings-help-inline",
+                    iconButton: "ghost settings-icon-button",
+                    error: "settings-agents-error",
+                    textarea: "settings-agents-textarea",
+                    help: "settings-help",
+                  }}
+                />
+
+                <FileEditorCard
+                  title="Global config.toml"
+                  meta={globalConfigMeta}
+                  error={globalConfigError}
+                  value={globalConfigContent}
+                  placeholder="Edit the global Codex config.toml…"
+                  disabled={globalConfigLoading}
+                  refreshDisabled={globalConfigRefreshDisabled}
+                  saveDisabled={globalConfigSaveDisabled}
+                  saveLabel={globalConfigSaveLabel}
+                  onChange={setGlobalConfigContent}
+                  onRefresh={() => {
+                    void refreshGlobalConfig();
+                  }}
+                  onSave={() => {
+                    void saveGlobalConfig();
+                  }}
+                  helpText={
+                    <>
+                      Stored at <code>~/.codex/config.toml</code>.
+                    </>
+                  }
+                  classNames={{
+                    container: "settings-field settings-agents",
+                    header: "settings-agents-header",
+                    title: "settings-field-label",
+                    actions: "settings-agents-actions",
+                    meta: "settings-help settings-help-inline",
+                    iconButton: "ghost settings-icon-button",
+                    error: "settings-agents-error",
+                    textarea: "settings-agents-textarea",
+                    help: "settings-help",
+                  }}
+                />
 
                 <div className="settings-field">
                   <div className="settings-field-label">Workspace overrides</div>

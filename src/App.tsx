@@ -7,6 +7,7 @@ import "./styles/workspace-home.css";
 import "./styles/main.css";
 import "./styles/messages.css";
 import "./styles/approval-toasts.css";
+import "./styles/error-toasts.css";
 import "./styles/request-user-input.css";
 import "./styles/update-toasts.css";
 import "./styles/composer.css";
@@ -61,6 +62,7 @@ import {
 } from "./features/layout/components/SidebarToggleControls";
 import { useAppSettingsController } from "./features/app/hooks/useAppSettingsController";
 import { useUpdaterController } from "./features/app/hooks/useUpdaterController";
+import { useErrorToasts } from "./features/notifications/hooks/useErrorToasts";
 import { useComposerShortcuts } from "./features/composer/hooks/useComposerShortcuts";
 import { useComposerMenuActions } from "./features/composer/hooks/useComposerMenuActions";
 import { useComposerEditorState } from "./features/composer/hooks/useComposerEditorState";
@@ -82,13 +84,17 @@ import { useAppMenuEvents } from "./features/app/hooks/useAppMenuEvents";
 import { useWorkspaceActions } from "./features/app/hooks/useWorkspaceActions";
 import { useWorkspaceCycling } from "./features/app/hooks/useWorkspaceCycling";
 import { useThreadRows } from "./features/app/hooks/useThreadRows";
+import { useInterruptShortcut } from "./features/app/hooks/useInterruptShortcut";
+import { useArchiveShortcut } from "./features/app/hooks/useArchiveShortcut";
 import { useLiquidGlassEffect } from "./features/app/hooks/useLiquidGlassEffect";
 import { useCopyThread } from "./features/threads/hooks/useCopyThread";
 import { useTerminalController } from "./features/terminal/hooks/useTerminalController";
 import { useWorkspaceLaunchScript } from "./features/app/hooks/useWorkspaceLaunchScript";
+import { useWorktreeSetupScript } from "./features/app/hooks/useWorktreeSetupScript";
 import { useGitCommitController } from "./features/app/hooks/useGitCommitController";
 import { WorkspaceHome } from "./features/workspaces/components/WorkspaceHome";
 import { useWorkspaceHome } from "./features/workspaces/hooks/useWorkspaceHome";
+import { useWorkspaceAgentMd } from "./features/workspaces/hooks/useWorkspaceAgentMd";
 import { pickWorkspacePath } from "./services/tauri";
 import type {
   AccessMode,
@@ -125,7 +131,6 @@ function MainApp() {
     appSettingsLoading,
     reduceTransparency,
     setReduceTransparency,
-    uiScale,
     scaleShortcutTitle,
     scaleShortcutText,
     queueSaveSettings,
@@ -220,8 +225,8 @@ function MainApp() {
     handleDebugClick,
     handleToggleTerminal,
     openTerminal,
+    closeTerminal: closeTerminalPanel,
   } = useLayoutController({
-    uiScale,
     activeWorkspaceId,
     setActiveTab,
     setDebugOpen,
@@ -256,6 +261,8 @@ function MainApp() {
     successSoundUrl,
     errorSoundUrl,
   });
+
+  const { errorToasts, dismissErrorToast } = useErrorToasts();
 
   useEffect(() => {
     setAccessMode((prev) =>
@@ -364,6 +371,7 @@ function MainApp() {
     selectedModel,
     selectedModelId,
     setSelectedModelId,
+    reasoningSupported,
     reasoningOptions,
     selectedEffort,
     setSelectedEffort
@@ -404,6 +412,7 @@ function MainApp() {
     reasoningOptions,
     selectedEffort,
     onSelectEffort: setSelectedEffort,
+    reasoningSupported,
   });
 
   useComposerMenuActions({
@@ -418,6 +427,7 @@ function MainApp() {
     reasoningOptions,
     selectedEffort,
     onSelectEffort: setSelectedEffort,
+    reasoningSupported,
     onFocusComposer: () => composerInputRef.current?.focus(),
   });
   const { skills } = useSkills({ activeWorkspace, onDebug: addDebugEntry });
@@ -467,6 +477,7 @@ function MainApp() {
   });
 
   const resolvedModel = selectedModel?.model ?? null;
+  const resolvedEffort = reasoningSupported ? selectedEffort : null;
   const activeGitRoot = activeWorkspace?.settings.gitRoot ?? null;
   const normalizePath = useCallback((value: string) => {
     return value.replace(/\\/g, "/").replace(/\/+$/, "");
@@ -565,7 +576,7 @@ function MainApp() {
   const { collaborationModePayload } = useCollaborationModeSelection({
     selectedCollaborationMode,
     selectedCollaborationModeId,
-    selectedEffort,
+    selectedEffort: resolvedEffort,
     resolvedModel,
   });
 
@@ -608,7 +619,7 @@ function MainApp() {
     onWorkspaceConnected: markWorkspaceConnected,
     onDebug: addDebugEntry,
     model: resolvedModel,
-    effort: selectedEffort,
+    effort: resolvedEffort,
     collaborationMode: collaborationModePayload,
     accessMode,
     steerEnabled: appSettings.experimentalSteerEnabled,
@@ -686,6 +697,52 @@ function MainApp() {
     }
   }, [activeWorkspace, openRenameWorktreePrompt]);
 
+  const {
+    terminalTabs,
+    activeTerminalId,
+    onSelectTerminal,
+    onNewTerminal,
+    onCloseTerminal,
+    terminalState,
+    ensureTerminalWithTitle,
+    restartTerminalSession,
+  } = useTerminalController({
+    activeWorkspaceId,
+    activeWorkspace,
+    terminalOpen,
+    onCloseTerminalPanel: closeTerminalPanel,
+    onDebug: addDebugEntry,
+  });
+
+  const ensureLaunchTerminal = useCallback(
+    (workspaceId: string) => ensureTerminalWithTitle(workspaceId, "launch", "Launch"),
+    [ensureTerminalWithTitle],
+  );
+
+  const launchScriptState = useWorkspaceLaunchScript({
+    activeWorkspace,
+    updateWorkspaceSettings,
+    openTerminal,
+    ensureLaunchTerminal,
+    restartLaunchSession: restartTerminalSession,
+    terminalState,
+    activeTerminalId,
+  });
+
+  const worktreeSetupScriptState = useWorktreeSetupScript({
+    ensureTerminalWithTitle,
+    restartTerminalSession,
+    openTerminal,
+    onDebug: addDebugEntry,
+  });
+
+  const handleWorktreeCreated = useCallback(
+    async (worktree: WorkspaceInfo, _parentWorkspace?: WorkspaceInfo) => {
+      await worktreeSetupScriptState.maybeRunWorktreeSetupScript(worktree);
+    },
+    [worktreeSetupScriptState],
+  );
+
   const { exitDiffView, selectWorkspace, selectHome } = useWorkspaceSelection({
     workspaces,
     isCompact,
@@ -702,10 +759,13 @@ function MainApp() {
     confirmPrompt: confirmWorktreePrompt,
     cancelPrompt: cancelWorktreePrompt,
     updateBranch: updateWorktreeBranch,
+    updateSetupScript: updateWorktreeSetupScript,
   } = useWorktreePrompt({
     addWorktreeAgent,
+    updateWorkspaceSettings,
     connectWorkspace,
     onSelectWorkspace: selectWorkspace,
+    onWorktreeCreated: handleWorktreeCreated,
     onCompactActivate: isCompact ? () => setActiveTab("codex") : undefined,
     onError: (message) => {
       addDebugEntry({
@@ -954,6 +1014,50 @@ function MainApp() {
     connectWorkspace,
     startThreadForWorkspace,
     sendUserMessageToThread,
+    onWorktreeCreated: handleWorktreeCreated,
+  });
+  const RECENT_THREAD_LIMIT = 8;
+  const { recentThreadInstances, recentThreadsUpdatedAt } = useMemo(() => {
+    if (!activeWorkspaceId) {
+      return { recentThreadInstances: [], recentThreadsUpdatedAt: null };
+    }
+    const threads = threadsByWorkspace[activeWorkspaceId] ?? [];
+    if (threads.length === 0) {
+      return { recentThreadInstances: [], recentThreadsUpdatedAt: null };
+    }
+    const sorted = [...threads].sort((a, b) => b.updatedAt - a.updatedAt);
+    const slice = sorted.slice(0, RECENT_THREAD_LIMIT);
+    const updatedAt = slice.reduce(
+      (max, thread) => (thread.updatedAt > max ? thread.updatedAt : max),
+      0,
+    );
+    const instances = slice.map((thread, index) => ({
+      id: `recent-${thread.id}`,
+      workspaceId: activeWorkspaceId,
+      threadId: thread.id,
+      modelId: null,
+      modelLabel: thread.name?.trim() || "Untitled thread",
+      sequence: index + 1,
+    }));
+    return {
+      recentThreadInstances: instances,
+      recentThreadsUpdatedAt: updatedAt > 0 ? updatedAt : null,
+    };
+  }, [activeWorkspaceId, threadsByWorkspace]);
+  const {
+    content: agentMdContent,
+    exists: agentMdExists,
+    truncated: agentMdTruncated,
+    isLoading: agentMdLoading,
+    isSaving: agentMdSaving,
+    error: agentMdError,
+    isDirty: agentMdDirty,
+    setContent: setAgentMdContent,
+    refresh: refreshAgentMd,
+    save: saveAgentMd,
+  } = useWorkspaceAgentMd({
+    activeWorkspace,
+    onDebug: addDebugEntry,
   });
 
   const {
@@ -1204,6 +1308,29 @@ function MainApp() {
     onDropPaths: handleDropWorkspacePaths,
   });
 
+  const handleArchiveActiveThread = useCallback(() => {
+    if (!activeWorkspaceId || !activeThreadId) {
+      return;
+    }
+    removeThread(activeWorkspaceId, activeThreadId);
+    clearDraftForThread(activeThreadId);
+    removeImagesForThread(activeThreadId);
+  }, [
+    activeThreadId,
+    activeWorkspaceId,
+    clearDraftForThread,
+    removeImagesForThread,
+    removeThread,
+  ]);
+
+  useInterruptShortcut({
+    isEnabled: canInterrupt,
+    shortcut: appSettings.interruptShortcut,
+    onTrigger: () => {
+      void interruptTurn();
+    },
+  });
+
   const {
     handleSelectPullRequest,
     resetPullRequestSelection,
@@ -1306,35 +1433,12 @@ function MainApp() {
     ? centerMode === "chat" || centerMode === "diff"
     : (isTablet ? tabletTab : activeTab) === "codex") && !showWorkspaceHome;
   const showGitDetail = Boolean(selectedDiffPath) && isPhone;
-  const {
-    terminalTabs,
-    activeTerminalId,
-    onSelectTerminal,
-    onNewTerminal,
-    onCloseTerminal,
-    terminalState,
-    ensureTerminalWithTitle,
-    restartTerminalSession,
-  } = useTerminalController({
-    activeWorkspaceId,
-    activeWorkspace,
-    terminalOpen,
-    onDebug: addDebugEntry,
-  });
+  const isThreadOpen = Boolean(activeThreadId && showComposer);
 
-  const ensureLaunchTerminal = useCallback(
-    (workspaceId: string) => ensureTerminalWithTitle(workspaceId, "launch", "Launch"),
-    [ensureTerminalWithTitle],
-  );
-
-  const launchScriptState = useWorkspaceLaunchScript({
-    activeWorkspace,
-    updateWorkspaceSettings,
-    openTerminal,
-    ensureLaunchTerminal,
-    restartLaunchSession: restartTerminalSession,
-    terminalState,
-    activeTerminalId,
+  useArchiveShortcut({
+    isEnabled: isThreadOpen,
+    shortcut: appSettings.archiveThreadShortcut,
+    onTrigger: handleArchiveActiveThread,
   });
 
   const { handleCycleAgent, handleCycleWorkspace } = useWorkspaceCycling({
@@ -1380,7 +1484,6 @@ function MainApp() {
   });
 
   useMenuAcceleratorController({ appSettings, onDebug: addDebugEntry });
-  const isDefaultScale = Math.abs(uiScale - 1) < 0.001;
   const dropOverlayActive = isWorkspaceDropActive;
   const dropOverlayText = "Drop Project Here";
   const appClassName = `app ${isCompact ? "layout-compact" : "layout-desktop"}${
@@ -1389,13 +1492,14 @@ function MainApp() {
     reduceTransparency ? " reduced-transparency" : ""
   }${!isCompact && sidebarCollapsed ? " sidebar-collapsed" : ""}${
     !isCompact && rightPanelCollapsed ? " right-panel-collapsed" : ""
-  }${isDefaultScale ? " ui-scale-default" : ""}`;
+  }`;
   const {
     sidebarNode,
     messagesNode,
     composerNode,
     approvalToastsNode,
     updateToastNode,
+    errorToastsNode,
     homeNode,
     mainHeaderNode,
     desktopTopbarLeftNode,
@@ -1512,6 +1616,8 @@ function MainApp() {
     updaterState,
     onUpdate: startUpdate,
     onDismissUpdate: dismissUpdate,
+    errorToasts,
+    onDismissErrorToast: dismissErrorToast,
     latestAgentRuns,
     isLoadingLatestAgents,
     localUsageSnapshot,
@@ -1713,6 +1819,7 @@ function MainApp() {
     reasoningOptions,
     selectedEffort,
     onSelectEffort: setSelectedEffort,
+    reasoningSupported,
     accessMode,
     onSelectAccessMode: setAccessMode,
     skills,
@@ -1769,6 +1876,8 @@ function MainApp() {
     <WorkspaceHome
       workspace={activeWorkspace}
       runs={workspaceRuns}
+      recentThreadInstances={recentThreadInstances}
+      recentThreadsUpdatedAt={recentThreadsUpdatedAt}
       prompt={workspacePrompt}
       onPromptChange={setWorkspacePrompt}
       onStartRun={startWorkspaceRun}
@@ -1800,6 +1909,20 @@ function MainApp() {
       onDismissDictationHint={clearDictationHint}
       dictationTranscript={dictationTranscript}
       onDictationTranscriptHandled={clearDictationTranscript}
+      agentMdContent={agentMdContent}
+      agentMdExists={agentMdExists}
+      agentMdTruncated={agentMdTruncated}
+      agentMdLoading={agentMdLoading}
+      agentMdSaving={agentMdSaving}
+      agentMdError={agentMdError}
+      agentMdDirty={agentMdDirty}
+      onAgentMdChange={setAgentMdContent}
+      onAgentMdRefresh={() => {
+        void refreshAgentMd();
+      }}
+      onAgentMdSave={() => {
+        void saveAgentMd();
+      }}
     />
   ) : null;
 
@@ -1828,7 +1951,6 @@ function MainApp() {
           "--plan-panel-height": `${planPanelHeight}px`,
           "--terminal-panel-height": `${terminalPanelHeight}px`,
           "--debug-panel-height": `${debugPanelHeight}px`,
-          "--ui-scale": String(uiScale),
           "--ui-font-family": appSettings.uiFontFamily,
           "--code-font-family": appSettings.codeFontFamily,
           "--code-font-size": `${appSettings.codeFontSize}px`
@@ -1867,6 +1989,7 @@ function MainApp() {
         composerNode={composerNode}
         approvalToastsNode={approvalToastsNode}
         updateToastNode={updateToastNode}
+        errorToastsNode={errorToastsNode}
         homeNode={homeNode}
         mainHeaderNode={mainHeaderNode}
         desktopTopbarLeftNode={desktopTopbarLeftNodeWithToggle}
@@ -1892,6 +2015,7 @@ function MainApp() {
         onRenamePromptConfirm={handleRenamePromptConfirm}
         worktreePrompt={worktreePrompt}
         onWorktreePromptChange={updateWorktreeBranch}
+        onWorktreeSetupScriptChange={updateWorktreeSetupScript}
         onWorktreePromptCancel={cancelWorktreePrompt}
         onWorktreePromptConfirm={confirmWorktreePrompt}
         clonePrompt={clonePrompt}

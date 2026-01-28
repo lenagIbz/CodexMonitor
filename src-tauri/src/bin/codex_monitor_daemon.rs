@@ -7,10 +7,18 @@ mod codex_args;
 mod codex_home;
 #[path = "../codex_config.rs"]
 mod codex_config;
+#[path = "../file_io.rs"]
+mod file_io;
+#[path = "../file_ops.rs"]
+mod file_ops;
+#[path = "../file_policy.rs"]
+mod file_policy;
 #[path = "../rules.rs"]
 mod rules;
 #[path = "../storage.rs"]
 mod storage;
+#[path = "../utils.rs"]
+mod utils;
 #[allow(dead_code)]
 #[path = "../types.rs"]
 mod types;
@@ -31,15 +39,33 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use uuid::Uuid;
+use utils::{git_env_path, resolve_git_binary};
 
 use backend::app_server::{spawn_workspace_session, WorkspaceSession};
 use backend::events::{AppServerEvent, EventSink, TerminalOutput};
 use storage::{read_settings, read_workspaces, write_settings, write_workspaces};
 use types::{
     AppSettings, WorkspaceEntry, WorkspaceInfo, WorkspaceKind, WorkspaceSettings, WorktreeInfo,
+    WorktreeSetupStatus,
 };
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:4732";
+const WORKTREE_SETUP_MARKERS_DIR: &str = "worktree-setup";
+const WORKTREE_SETUP_MARKER_EXT: &str = "ran";
+
+fn worktree_setup_marker_path(data_dir: &PathBuf, workspace_id: &str) -> PathBuf {
+    data_dir
+        .join(WORKTREE_SETUP_MARKERS_DIR)
+        .join(format!("{workspace_id}.{WORKTREE_SETUP_MARKER_EXT}"))
+}
+
+fn normalize_setup_script(script: Option<String>) -> Option<String> {
+    match script {
+        Some(value) if value.trim().is_empty() => None,
+        Some(value) => Some(value),
+        None => None,
+    }
+}
 
 #[derive(Clone)]
 struct DaemonEventSink {
@@ -272,7 +298,12 @@ impl DaemonState {
             worktree: Some(WorktreeInfo {
                 branch: branch.to_string(),
             }),
-            settings: WorkspaceSettings::default(),
+            settings: WorkspaceSettings {
+                worktree_setup_script: normalize_setup_script(
+                    parent_entry.settings.worktree_setup_script.clone(),
+                ),
+                ..WorkspaceSettings::default()
+            },
         };
 
         let (default_bin, codex_args) = {
@@ -318,6 +349,51 @@ impl DaemonState {
             worktree: entry.worktree,
             settings: entry.settings,
         })
+    }
+
+    async fn worktree_setup_status(&self, workspace_id: String) -> Result<WorktreeSetupStatus, String> {
+        let entry = {
+            let workspaces = self.workspaces.lock().await;
+            workspaces
+                .get(&workspace_id)
+                .cloned()
+                .ok_or_else(|| "workspace not found".to_string())?
+        };
+
+        let script = normalize_setup_script(entry.settings.worktree_setup_script.clone());
+        let marker_exists = if entry.kind.is_worktree() {
+            worktree_setup_marker_path(&self.data_dir, &entry.id).exists()
+        } else {
+            false
+        };
+        let should_run = entry.kind.is_worktree() && script.is_some() && !marker_exists;
+
+        Ok(WorktreeSetupStatus { should_run, script })
+    }
+
+    async fn worktree_setup_mark_ran(&self, workspace_id: String) -> Result<(), String> {
+        let entry = {
+            let workspaces = self.workspaces.lock().await;
+            workspaces
+                .get(&workspace_id)
+                .cloned()
+                .ok_or_else(|| "workspace not found".to_string())?
+        };
+        if !entry.kind.is_worktree() {
+            return Err("Not a worktree workspace.".to_string());
+        }
+        let marker_path = worktree_setup_marker_path(&self.data_dir, &entry.id);
+        if let Some(parent) = marker_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("Failed to prepare worktree marker directory: {err}"))?;
+        }
+        let ran_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        std::fs::write(&marker_path, format!("ran_at={ran_at}\n"))
+            .map_err(|err| format!("Failed to write worktree setup marker: {err}"))?;
+        Ok(())
     }
 
     async fn remove_workspace(&self, id: String) -> Result<(), String> {
@@ -688,12 +764,16 @@ impl DaemonState {
         settings: WorkspaceSettings,
         client_version: String,
     ) -> Result<WorkspaceInfo, String> {
+        let mut settings = settings;
+        settings.worktree_setup_script = normalize_setup_script(settings.worktree_setup_script);
+
         let (
             previous_entry,
             entry_snapshot,
             parent_entry,
             previous_codex_home,
             previous_codex_args,
+            previous_worktree_setup_script,
             child_entries,
         ) = {
             let mut workspaces = self.workspaces.lock().await;
@@ -703,6 +783,7 @@ impl DaemonState {
                 .ok_or_else(|| "workspace not found".to_string())?;
             let previous_codex_home = previous_entry.settings.codex_home.clone();
             let previous_codex_args = previous_entry.settings.codex_args.clone();
+            let previous_worktree_setup_script = previous_entry.settings.worktree_setup_script.clone();
             let entry_snapshot = match workspaces.get_mut(&id) {
                 Some(entry) => {
                     entry.settings = settings.clone();
@@ -726,12 +807,15 @@ impl DaemonState {
                 parent_entry,
                 previous_codex_home,
                 previous_codex_args,
+                previous_worktree_setup_script,
                 child_entries,
             )
         };
 
         let codex_home_changed = previous_codex_home != entry_snapshot.settings.codex_home;
         let codex_args_changed = previous_codex_args != entry_snapshot.settings.codex_args;
+        let worktree_setup_script_changed =
+            previous_worktree_setup_script != entry_snapshot.settings.worktree_setup_script;
         let connected = self.sessions.lock().await.contains_key(&id);
         if connected && (codex_home_changed || codex_args_changed) {
             let rollback_entry = previous_entry.clone();
@@ -778,7 +862,7 @@ impl DaemonState {
         if codex_home_changed || codex_args_changed {
             let app_settings = self.app_settings.lock().await.clone();
             let default_bin = app_settings.codex_bin.clone();
-            for child in child_entries {
+            for child in &child_entries {
                 let connected = self.sessions.lock().await.contains_key(&child.id);
                 if !connected {
                     continue;
@@ -829,6 +913,21 @@ impl DaemonState {
                 {
                     let mut child = old_session.child.lock().await;
                     let _ = child.kill().await;
+                }
+            }
+        }
+        if worktree_setup_script_changed && !entry_snapshot.kind.is_worktree() {
+            let child_ids = child_entries
+                .iter()
+                .map(|child| child.id.clone())
+                .collect::<Vec<_>>();
+            if !child_ids.is_empty() {
+                let mut workspaces = self.workspaces.lock().await;
+                for child_id in child_ids {
+                    if let Some(child) = workspaces.get_mut(&child_id) {
+                        child.settings.worktree_setup_script =
+                            entry_snapshot.settings.worktree_setup_script.clone();
+                    }
                 }
             }
         }
@@ -986,6 +1085,61 @@ impl DaemonState {
 
         let root = PathBuf::from(entry.path);
         read_workspace_file_inner(&root, &path)
+    }
+
+    async fn resolve_workspace_root(&self, workspace_id: &str) -> Result<PathBuf, String> {
+        let entry = {
+            let workspaces = self.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .cloned()
+                .ok_or("workspace not found")?
+        };
+
+        Ok(PathBuf::from(entry.path))
+    }
+
+    fn resolve_default_codex_home(&self) -> Result<PathBuf, String> {
+        codex_home::resolve_default_codex_home()
+            .ok_or_else(|| "Unable to resolve CODEX_HOME".to_string())
+    }
+
+    async fn resolve_root(
+        &self,
+        scope: file_policy::FileScope,
+        workspace_id: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        match scope {
+            file_policy::FileScope::Global => self.resolve_default_codex_home(),
+            file_policy::FileScope::Workspace => {
+                let workspace_id =
+                    workspace_id.ok_or_else(|| "workspaceId is required".to_string())?;
+                self.resolve_workspace_root(workspace_id).await
+            }
+        }
+    }
+
+    async fn file_read(
+        &self,
+        scope: file_policy::FileScope,
+        kind: file_policy::FileKind,
+        workspace_id: Option<String>,
+    ) -> Result<file_io::TextFileResponse, String> {
+        let policy = file_policy::policy_for(scope, kind)?;
+        let root = self.resolve_root(scope, workspace_id.as_deref()).await?;
+        file_ops::read_with_policy(&root, policy)
+    }
+
+    async fn file_write(
+        &self,
+        scope: file_policy::FileScope,
+        kind: file_policy::FileKind,
+        workspace_id: Option<String>,
+        content: String,
+    ) -> Result<(), String> {
+        let policy = file_policy::policy_for(scope, kind)?;
+        let root = self.resolve_root(scope, workspace_id.as_deref()).await?;
+        file_ops::write_with_policy(&root, policy, &content)
     }
 
     async fn start_thread(&self, workspace_id: String) -> Result<Value, String> {
@@ -1181,10 +1335,27 @@ impl DaemonState {
             return Err("empty command".to_string());
         }
 
+        let codex_home = self.resolve_codex_home_for_workspace(&workspace_id).await?;
+        let rules_path = rules::default_rules_path(&codex_home);
+        rules::append_prefix_rule(&rules_path, &command)?;
+
+        Ok(json!({
+            "ok": true,
+            "rulesPath": rules_path,
+        }))
+    }
+
+    async fn get_config_model(&self, workspace_id: String) -> Result<Value, String> {
+        let codex_home = self.resolve_codex_home_for_workspace(&workspace_id).await?;
+        let model = codex_config::read_config_model(Some(codex_home))?;
+        Ok(json!({ "model": model }))
+    }
+
+    async fn resolve_codex_home_for_workspace(&self, workspace_id: &str) -> Result<PathBuf, String> {
         let (entry, parent_entry) = {
             let workspaces = self.workspaces.lock().await;
             let entry = workspaces
-                .get(&workspace_id)
+                .get(workspace_id)
                 .ok_or("workspace not found")?
                 .clone();
             let parent_entry = entry
@@ -1195,16 +1366,9 @@ impl DaemonState {
             (entry, parent_entry)
         };
 
-        let codex_home = codex_home::resolve_workspace_codex_home(&entry, parent_entry.as_ref())
+        codex_home::resolve_workspace_codex_home(&entry, parent_entry.as_ref())
             .or_else(codex_home::resolve_default_codex_home)
-            .ok_or("Unable to resolve CODEX_HOME".to_string())?;
-        let rules_path = rules::default_rules_path(&codex_home);
-        rules::append_prefix_rule(&rules_path, &command)?;
-
-        Ok(json!({
-            "ok": true,
-            "rulesPath": rules_path,
-        }))
+            .ok_or("Unable to resolve CODEX_HOME".to_string())
     }
 }
 
@@ -1293,8 +1457,7 @@ fn read_workspace_file_inner(
         return Err("Path is not a file".to_string());
     }
 
-    let mut file =
-        File::open(&canonical_path).map_err(|err| format!("Failed to open file: {err}"))?;
+    let file = File::open(&canonical_path).map_err(|err| format!("Failed to open file: {err}"))?;
     let mut buffer = Vec::new();
     file.take(MAX_WORKSPACE_FILE_BYTES + 1)
         .read_to_end(&mut buffer)
@@ -1311,9 +1474,11 @@ fn read_workspace_file_inner(
 }
 
 async fn run_git_command(repo_path: &PathBuf, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
+    let git_bin = resolve_git_binary().map_err(|e| format!("Failed to run git: {e}"))?;
+    let output = Command::new(git_bin)
         .args(args)
         .current_dir(repo_path)
+        .env("PATH", git_env_path())
         .output()
         .await
         .map_err(|e| format!("Failed to run git: {e}"))?;
@@ -1340,9 +1505,11 @@ fn is_missing_worktree_error(error: &str) -> bool {
 }
 
 async fn git_branch_exists(repo_path: &PathBuf, branch: &str) -> Result<bool, String> {
-    let status = Command::new("git")
+    let git_bin = resolve_git_binary().map_err(|e| format!("Failed to run git: {e}"))?;
+    let status = Command::new(git_bin)
         .args(["show-ref", "--verify", &format!("refs/heads/{branch}")])
         .current_dir(repo_path)
+        .env("PATH", git_env_path())
         .status()
         .await
         .map_err(|e| format!("Failed to run git: {e}"))?;
@@ -1350,9 +1517,11 @@ async fn git_branch_exists(repo_path: &PathBuf, branch: &str) -> Result<bool, St
 }
 
 async fn git_remote_exists(repo_path: &PathBuf, remote: &str) -> Result<bool, String> {
-    let status = Command::new("git")
+    let git_bin = resolve_git_binary().map_err(|e| format!("Failed to run git: {e}"))?;
+    let status = Command::new(git_bin)
         .args(["remote", "get-url", remote])
         .current_dir(repo_path)
+        .env("PATH", git_env_path())
         .status()
         .await
         .map_err(|e| format!("Failed to run git: {e}"))?;
@@ -1364,7 +1533,8 @@ async fn git_remote_branch_exists_live(
     remote: &str,
     branch: &str,
 ) -> Result<bool, String> {
-    let output = Command::new("git")
+    let git_bin = resolve_git_binary().map_err(|e| format!("Failed to run git: {e}"))?;
+    let output = Command::new(git_bin)
         .args([
             "ls-remote",
             "--heads",
@@ -1372,6 +1542,7 @@ async fn git_remote_branch_exists_live(
             &format!("refs/heads/{branch}"),
         ])
         .current_dir(repo_path)
+        .env("PATH", git_env_path())
         .output()
         .await
         .map_err(|e| format!("Failed to run git: {e}"))?;
@@ -1394,13 +1565,15 @@ async fn git_remote_branch_exists_live(
 }
 
 async fn git_remote_branch_exists(repo_path: &PathBuf, remote: &str, branch: &str) -> Result<bool, String> {
-    let status = Command::new("git")
+    let git_bin = resolve_git_binary().map_err(|e| format!("Failed to run git: {e}"))?;
+    let status = Command::new(git_bin)
         .args([
             "show-ref",
             "--verify",
             &format!("refs/remotes/{remote}/{branch}"),
         ])
         .current_dir(repo_path)
+        .env("PATH", git_env_path())
         .status()
         .await
         .map_err(|e| format!("Failed to run git: {e}"))?;
@@ -1729,6 +1902,31 @@ fn parse_optional_value(value: &Value, key: &str) -> Option<Value> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileReadRequest {
+    scope: file_policy::FileScope,
+    kind: file_policy::FileKind,
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileWriteRequest {
+    scope: file_policy::FileScope,
+    kind: file_policy::FileKind,
+    workspace_id: Option<String>,
+    content: String,
+}
+
+fn parse_file_read_request(params: &Value) -> Result<FileReadRequest, String> {
+    serde_json::from_value(params.clone()).map_err(|err| err.to_string())
+}
+
+fn parse_file_write_request(params: &Value) -> Result<FileWriteRequest, String> {
+    serde_json::from_value(params.clone()).map_err(|err| err.to_string())
+}
+
 async fn handle_rpc_request(
     state: &DaemonState,
     method: &str,
@@ -1759,6 +1957,16 @@ async fn handle_rpc_request(
                 .add_worktree(parent_id, branch, client_version)
                 .await?;
             serde_json::to_value(workspace).map_err(|err| err.to_string())
+        }
+        "worktree_setup_status" => {
+            let workspace_id = parse_string(&params, "workspaceId")?;
+            let status = state.worktree_setup_status(workspace_id).await?;
+            serde_json::to_value(status).map_err(|err| err.to_string())
+        }
+        "worktree_setup_mark_ran" => {
+            let workspace_id = parse_string(&params, "workspaceId")?;
+            state.worktree_setup_mark_ran(workspace_id).await?;
+            Ok(json!({ "ok": true }))
         }
         "connect_workspace" => {
             let id = parse_string(&params, "id")?;
@@ -1820,6 +2028,25 @@ async fn handle_rpc_request(
             let response = state.read_workspace_file(workspace_id, path).await?;
             serde_json::to_value(response).map_err(|err| err.to_string())
         }
+        "file_read" => {
+            let request = parse_file_read_request(&params)?;
+            let response = state
+                .file_read(request.scope, request.kind, request.workspace_id)
+                .await?;
+            serde_json::to_value(response).map_err(|err| err.to_string())
+        }
+        "file_write" => {
+            let request = parse_file_write_request(&params)?;
+            state
+                .file_write(
+                    request.scope,
+                    request.kind,
+                    request.workspace_id,
+                    request.content,
+                )
+                .await?;
+            serde_json::to_value(json!({ "ok": true })).map_err(|err| err.to_string())
+        }
         "get_app_settings" => {
             let mut settings = state.app_settings.lock().await.clone();
             if let Ok(Some(collab_enabled)) = codex_config::read_collab_enabled() {
@@ -1855,6 +2082,10 @@ async fn handle_rpc_request(
                 .to_str()
                 .ok_or("Unable to resolve CODEX_HOME".to_string())?;
             Ok(Value::String(path.to_string()))
+        }
+        "get_config_model" => {
+            let workspace_id = parse_string(&params, "workspaceId")?;
+            state.get_config_model(workspace_id).await
         }
         "start_thread" => {
             let workspace_id = parse_string(&params, "workspaceId")?;
