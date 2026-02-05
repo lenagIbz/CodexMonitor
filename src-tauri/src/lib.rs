@@ -49,6 +49,8 @@ pub fn run() {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = event;
         })
         .setup(|app| {
             let state = state::AppState::load(&app.handle());
@@ -179,5 +181,7 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (app_handle, event);
     });
 }

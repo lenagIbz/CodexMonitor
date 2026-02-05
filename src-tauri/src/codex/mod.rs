@@ -19,12 +19,33 @@ use crate::backend::app_server::{
     spawn_workspace_session as spawn_workspace_session_inner,
 };
 use crate::shared::process_core::tokio_command;
+use crate::shared::session_threads;
 use crate::event_sink::TauriEventSink;
 use crate::remote_backend;
 use crate::shared::codex_core;
 use crate::state::AppState;
 use crate::types::WorkspaceEntry;
 use self::args::apply_codex_args;
+use self::home::{resolve_default_codex_home, resolve_workspace_codex_home};
+
+async fn resolve_codex_home_for_workspace(
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<PathBuf, String> {
+    let workspaces = state.workspaces.lock().await;
+    let entry = workspaces
+        .get(workspace_id)
+        .cloned()
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let parent_entry = entry
+        .parent_id
+        .as_ref()
+        .and_then(|parent_id| workspaces.get(parent_id))
+        .cloned();
+    resolve_workspace_codex_home(&entry, parent_entry.as_ref())
+        .or_else(resolve_default_codex_home)
+        .ok_or_else(|| "Unable to resolve CODEX_HOME".to_string())
+}
 
 pub(crate) async fn spawn_workspace_session(
     entry: WorkspaceEntry,
@@ -180,7 +201,18 @@ pub(crate) async fn resume_thread(
         .await;
     }
 
-    codex_core::resume_thread_core(&state.sessions, workspace_id, thread_id).await
+    match codex_core::resume_thread_core(&state.sessions, workspace_id.clone(), thread_id.clone())
+        .await
+    {
+        Ok(response) => Ok(response),
+        Err(err) => {
+            let codex_home = resolve_codex_home_for_workspace(&state, &workspace_id).await?;
+            if let Some(thread) = session_threads::load_session_thread(&codex_home, &thread_id)? {
+                return Ok(json!({ "thread": thread }));
+            }
+            Err(err)
+        }
+    }
 }
 
 #[tauri::command]
@@ -221,7 +253,37 @@ pub(crate) async fn list_threads(
         .await;
     }
 
-    codex_core::list_threads_core(&state.sessions, workspace_id, cursor, limit).await
+    let response =
+        codex_core::list_threads_core(&state.sessions, workspace_id.clone(), cursor, limit).await;
+    let Ok(value) = &response else {
+        let codex_home = resolve_codex_home_for_workspace(&state, &workspace_id).await?;
+        let workspaces = state.workspaces.lock().await;
+        let entry = workspaces
+            .get(&workspace_id)
+            .cloned()
+            .ok_or_else(|| "workspace not found".to_string())?;
+        drop(workspaces);
+        let data = session_threads::list_session_threads(&codex_home, &entry.path, limit)?;
+        return Ok(json!({ "data": data, "nextCursor": null }));
+    };
+    let result = value.get("result").unwrap_or(value);
+    let data = result
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if data.is_empty() {
+        let codex_home = resolve_codex_home_for_workspace(&state, &workspace_id).await?;
+        let workspaces = state.workspaces.lock().await;
+        let entry = workspaces
+            .get(&workspace_id)
+            .cloned()
+            .ok_or_else(|| "workspace not found".to_string())?;
+        drop(workspaces);
+        let data = session_threads::list_session_threads(&codex_home, &entry.path, limit)?;
+        return Ok(json!({ "data": data, "nextCursor": null }));
+    }
+    response
 }
 
 #[tauri::command]
