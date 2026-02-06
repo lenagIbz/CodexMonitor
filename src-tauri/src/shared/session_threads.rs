@@ -9,7 +9,14 @@ fn normalize_windows_path(path: &str) -> String {
     let without_prefix = trimmed
         .strip_prefix(r"\\?\")
         .unwrap_or(trimmed.as_str());
-    without_prefix.to_ascii_lowercase()
+    #[cfg(windows)]
+    {
+        return without_prefix.to_ascii_lowercase();
+    }
+    #[cfg(not(windows))]
+    {
+        return without_prefix.to_string();
+    }
 }
 
 fn parse_timestamp_ms(value: &Value) -> Option<i64> {

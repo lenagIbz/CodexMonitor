@@ -49,8 +49,44 @@ async fn get_terminal_session(
         .ok_or_else(|| "Terminal session not found".to_string())
 }
 
-fn shell_path() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+fn shell_path() -> (String, Vec<String>) {
+    let env_shell = std::env::var("SHELL").ok().filter(|value| !value.trim().is_empty());
+    #[cfg(windows)]
+    {
+        let is_pwsh = |value: &str| value.to_ascii_lowercase().ends_with("pwsh.exe");
+        let is_powershell =
+            |value: &str| value.to_ascii_lowercase().ends_with("powershell.exe");
+        let is_cmd = |value: &str| value.to_ascii_lowercase().ends_with("cmd.exe");
+        if let Some(shell) = env_shell {
+            if is_pwsh(&shell) || is_powershell(&shell) {
+                return (shell, vec!["-NoLogo".to_string()]);
+            }
+            if is_cmd(&shell) {
+                return (shell, vec!["/K".to_string()]);
+            }
+            return (shell, vec!["-i".to_string()]);
+        }
+        let comspec = std::env::var("COMSPEC").ok();
+        let candidates = [
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            r"C:\Program Files\PowerShell\7-preview\pwsh.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        ];
+        for candidate in candidates {
+            if std::path::Path::new(candidate).exists() {
+                return (candidate.to_string(), vec!["-NoLogo".to_string()]);
+            }
+        }
+        if let Some(shell) = comspec {
+            return (shell, vec!["/K".to_string()]);
+        }
+        return (r"C:\Windows\System32\cmd.exe".to_string(), vec!["/K".to_string()]);
+    }
+    #[cfg(not(windows))]
+    {
+        let shell = env_shell.unwrap_or_else(|| "/bin/zsh".to_string());
+        (shell, vec!["-i".to_string()])
+    }
 }
 
 fn resolve_locale() -> String {
@@ -176,9 +212,12 @@ pub(crate) async fn terminal_open(
         .openpty(size)
         .map_err(|e| format!("Failed to open pty: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(shell_path());
+    let (shell, shell_args) = shell_path();
+    let mut cmd = CommandBuilder::new(shell);
     cmd.cwd(cwd);
-    cmd.arg("-i");
+    for arg in shell_args {
+        cmd.arg(arg);
+    }
     cmd.env("TERM", "xterm-256color");
     let locale = resolve_locale();
     cmd.env("LANG", &locale);
